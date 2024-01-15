@@ -1,4 +1,4 @@
-package reader
+package cleanweb
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -24,9 +25,10 @@ const (
 )
 
 var (
+	once        sync.Once
 	sess        *session.Session
 	browser     *rod.Browser
-	cahceClient = cache.New(24*time.Hour, 7*24*time.Hour)
+	cahceClient Cache
 )
 
 func initSession() {
@@ -43,12 +45,62 @@ func initBrowser() {
 	browser = rod.New().ControlURL(browserURL).MustConnect()
 }
 
-func Read(ctx context.Context, uri string, isFormatMarkdown bool, isUsingBrowser bool) (readability.Article, error) {
-	parsedURL, _ := url.ParseRequestURI(uri)
+func initCache() {
+	cahceClient = cache.New(24*time.Hour, 7*24*time.Hour)
+}
+
+type Cache interface {
+	Get(key string) (interface{}, bool)
+	Set(key string, value interface{}, d time.Duration)
+}
+
+type Parser struct {
+	sess             *session.Session
+	browser          *rod.Browser
+	timeout          time.Duration
+	isFormatMarkdown bool
+	cacheClient      Cache
+}
+
+func NewParser() *Parser {
+	once.Do(initSession)
+	once.Do(initCache)
+	return &Parser{
+		sess:        sess,
+		timeout:     defaultSessionTimeout,
+		cacheClient: cahceClient,
+	}
+}
+
+func (p *Parser) WithBrowser() *Parser {
+	once.Do(initBrowser)
+	p.browser = browser
+	return p
+}
+
+func (p *Parser) WithBrowserControlURL(browserURL string) *Parser {
+	p.browser = rod.New().ControlURL(browserURL).MustConnect()
+	return p
+}
+
+func (p *Parser) WithTimeout(timeout time.Duration) *Parser {
+	p.timeout = timeout
+	return p
+}
+
+func (p *Parser) WithFormatMarkdown() *Parser {
+	p.isFormatMarkdown = true
+	return p
+}
+
+func (p *Parser) Parse(ctx context.Context, uri string) (readability.Article, error) {
 	var article readability.Article
 	var err error
 	var html string
-
+	parsedURL, err := url.ParseRequestURI(uri)
+	if err != nil {
+		return article, fmt.Errorf("failed to parse url: %w", err)
+	}
 	if cahceClient != nil {
 		article, ok := cahceClient.Get(uri)
 		if ok {
@@ -56,12 +108,11 @@ func Read(ctx context.Context, uri string, isFormatMarkdown bool, isUsingBrowser
 		}
 	}
 
-	if isUsingBrowser {
+	if p.browser != nil {
 		html, err = readWithBrowser(uri)
 	} else {
 		html, err = read(parsedURL)
 	}
-
 	if err != nil {
 		return article, fmt.Errorf("failed to read url: %w", err)
 	}
@@ -70,7 +121,7 @@ func Read(ctx context.Context, uri string, isFormatMarkdown bool, isUsingBrowser
 		return article, fmt.Errorf("failed to parse %s, %v\n", uri, err)
 	}
 
-	if isFormatMarkdown {
+	if p.isFormatMarkdown {
 		converter := md.NewConverter("", true, nil)
 		markdown, err := converter.ConvertString(article.Content)
 		if err != nil {
@@ -79,7 +130,7 @@ func Read(ctx context.Context, uri string, isFormatMarkdown bool, isUsingBrowser
 		article.Content = markdown
 	}
 	article.Node = nil
-	cahceClient.SetDefault(uri, article)
+	cahceClient.Set(uri, article, 24*time.Hour)
 	return article, nil
 }
 
