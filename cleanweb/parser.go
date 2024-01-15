@@ -6,9 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"sync"
 	"time"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -19,39 +17,11 @@ import (
 	"github.com/vaayne/gtk/session"
 )
 
-const (
-	defaultUserAgent      = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36"
-	defaultSessionTimeout = 60 * time.Second
-)
-
-var (
-	once        sync.Once
-	sess        *session.Session
-	browser     *rod.Browser
-	cahceClient Cache
-)
-
-func initSession() {
-	sess = session.New(session.WithClientHelloID(utls.HelloChrome_100_PSK))
-	sess.Timeout = defaultSessionTimeout
-}
-
-func initBrowser() {
-	browserURL := os.Getenv("BROWSER_CONTROL_URL")
-	if browserURL == "" {
-		browserURL = "ws://localhost:3000"
-	}
-
-	browser = rod.New().ControlURL(browserURL).MustConnect()
-}
-
-func initCache() {
-	cahceClient = cache.New(24*time.Hour, 7*24*time.Hour)
-}
+const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36"
 
 type Cache interface {
 	Get(key string) (interface{}, bool)
-	Set(key string, value interface{}, d time.Duration)
+	SetDefault(key string, value interface{})
 }
 
 type Parser struct {
@@ -63,17 +33,19 @@ type Parser struct {
 }
 
 func NewParser() *Parser {
-	once.Do(initSession)
-	once.Do(initCache)
 	return &Parser{
-		sess:        sess,
-		timeout:     defaultSessionTimeout,
-		cacheClient: cahceClient,
+		sess:        session.New(session.WithClientHelloID(utls.HelloChrome_100_PSK)),
+		timeout:     60 * time.Second,
+		cacheClient: cache.New(24*time.Hour, 7*24*time.Hour),
 	}
 }
 
-func (p *Parser) WithBrowser() *Parser {
-	once.Do(initBrowser)
+func (p *Parser) WithSession(sess *session.Session) *Parser {
+	p.sess = sess
+	return p
+}
+
+func (p *Parser) WithBrowser(browser *rod.Browser) *Parser {
 	p.browser = browser
 	return p
 }
@@ -101,17 +73,17 @@ func (p *Parser) Parse(ctx context.Context, uri string) (readability.Article, er
 	if err != nil {
 		return article, fmt.Errorf("failed to parse url: %w", err)
 	}
-	if cahceClient != nil {
-		article, ok := cahceClient.Get(uri)
+	if p.cacheClient != nil {
+		article, ok := p.cacheClient.Get(uri)
 		if ok {
 			return article.(readability.Article), nil
 		}
 	}
 
 	if p.browser != nil {
-		html, err = readWithBrowser(uri)
+		html, err = p.readWithBrowser(uri)
 	} else {
-		html, err = read(parsedURL)
+		html, err = p.read(parsedURL)
 	}
 	if err != nil {
 		return article, fmt.Errorf("failed to read url: %w", err)
@@ -130,21 +102,17 @@ func (p *Parser) Parse(ctx context.Context, uri string) (readability.Article, er
 		article.Content = markdown
 	}
 	article.Node = nil
-	cahceClient.Set(uri, article, 24*time.Hour)
+	p.cacheClient.SetDefault(uri, article)
 	return article, nil
 }
 
-func read(u *url.URL) (string, error) {
-	if sess == nil {
-		initSession()
-	}
-
+func (p *Parser) read(u *url.URL) (string, error) {
 	uri := u.String()
 
+	p.sess.Client.Timeout = p.timeout
 	req, _ := http.NewRequest("GET", uri, nil)
 	req.Header.Set("User-Agent", defaultUserAgent)
-
-	resp, err := sess.Get(uri)
+	resp, err := p.sess.Get(uri)
 	if err != nil {
 		return "", err
 	}
@@ -156,12 +124,12 @@ func read(u *url.URL) (string, error) {
 	return string(content), err
 }
 
-func readWithBrowser(uri string) (string, error) {
-	if browser == nil {
-		initBrowser()
+func (p *Parser) readWithBrowser(uri string) (string, error) {
+	if p.browser == nil {
+		return "", fmt.Errorf("browser is not initialized")
 	}
 
-	page := browser.MustPage(uri).Timeout(defaultSessionTimeout)
+	page := p.browser.MustPage(uri).Timeout(p.timeout)
 	defer page.MustClose()
 
 	page.MustWaitLoad()
