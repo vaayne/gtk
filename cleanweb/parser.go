@@ -77,6 +77,10 @@ func (p *Parser) WithFormatMarkdown() *Parser {
 	return p                  // Return the Parser for method chaining
 }
 
+func getCachekey(uri string, isFormatMarkdown bool) string {
+	return fmt.Sprintf("cleanweb:%s:%v", uri, isFormatMarkdown)
+}
+
 // Parse is a method of the Parser struct that takes in a context and a URI string.
 // It parses the content at the given URL and returns a readability.Article and an error.
 func (p *Parser) Parse(ctx context.Context, uri string) (readability.Article, error) {
@@ -95,7 +99,7 @@ func (p *Parser) Parse(ctx context.Context, uri string) (readability.Article, er
 	// If the cache client is initialized
 	if p.cacheClient != nil {
 		// Try to get the article from the cache using the URI as the key
-		article, ok := p.cacheClient.Get(uri)
+		article, ok := p.cacheClient.Get(getCachekey(uri, p.isFormatMarkdown))
 		// If the article is in the cache, return the article and nil as the error
 		if ok {
 			return article.(readability.Article), nil
@@ -151,7 +155,7 @@ func (p *Parser) ParseHtml(ctx context.Context, html string, uri string) (readab
 	// Set the article's Node to nil
 	article.Node = nil
 	// Add the article to the cache with the URI as the key
-	p.cacheClient.SetDefault(uri, article)
+	p.cacheClient.SetDefault(getCachekey(uri, p.isFormatMarkdown), article)
 	// Return the article and nil as the error
 	return article, nil
 }
